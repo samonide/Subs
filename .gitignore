@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Runtime workspace data — media assets and project documents, never committed
+workspace/
+
+# Agent / tool scratch
+.superpowers/
+.impeccable/
+.claude/
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
