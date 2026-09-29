@@ -19,7 +19,7 @@ The product is a precision subtitle editor. Transcription is a starting draft, n
 deliverable: the editor is where a human corrects timing, restyles, and animates captions,
 and the export must match what the editor showed.
 
-That single requirement — *the exported video looks like the editor* — is the reason for
+That single requirement — _the exported video looks like the editor_ — is the reason for
 almost every structural decision here. The style resolver lives in one pure module that
 both the browser preview and the Node export worker call, so the two cannot drift.
 
@@ -45,17 +45,17 @@ pnpm verify         # typecheck + lint + format check + tests  (run this)
 
 Individual steps:
 
-| Command | Purpose |
-|---|---|
-| `pnpm build` | Compile TypeScript to `dist/` |
-| `pnpm typecheck` | Type-check without emitting |
-| `pnpm test` | Run the test suite once |
-| `pnpm test:watch` | Run tests in watch mode |
-| `pnpm lint` | ESLint, including the core-boundary rule |
-| `pnpm lint:fix` | ESLint with autofix |
-| `pnpm format` | Rewrite files with Prettier |
-| `pnpm format:check` | Verify formatting without writing |
-| `pnpm clean` | Remove build output |
+| Command             | Purpose                                  |
+| ------------------- | ---------------------------------------- |
+| `pnpm build`        | Compile TypeScript to `dist/`            |
+| `pnpm typecheck`    | Type-check without emitting              |
+| `pnpm test`         | Run the test suite once                  |
+| `pnpm test:watch`   | Run tests in watch mode                  |
+| `pnpm lint`         | ESLint, including the core-boundary rule |
+| `pnpm lint:fix`     | ESLint with autofix                      |
+| `pnpm format`       | Rewrite files with Prettier              |
+| `pnpm format:check` | Verify formatting without writing        |
+| `pnpm clean`        | Remove build output                      |
 
 > `pnpm verify` runs the full gate. The core-boundary test inspects compiled output, so
 > run `pnpm build` before `pnpm test` if you have only changed sources — `pnpm verify` does
@@ -99,20 +99,20 @@ and a convention is a rule that breaks by Phase 6.
 
 ## What's implemented in Phase 0
 
-| Area | Status |
-|---|---|
-| Integer-millisecond timing with exact rational frame rates | Done, tested at 30 / 29.97 / 60 fps |
-| Document model: assets, tracks, segments, words, style and animation registries | Done |
-| Stable, content-independent ID generation | Done |
-| Four-level style cascade (project → track → segment → word) with animation precedence | Done |
-| Pure operation model (`moveSegment`, `retimeSegment`, `splitSegment`, `mergeSegments`, style ops) | Done |
-| Worker-result application, so workers never replace the client document | Done |
-| Structural validation (Zod) and semantic invariant validation (I-1…I-14) | Done |
-| Versioned migration foundation with future-version refusal | Done |
-| Undo/redo UI, history panel, keyboard handling | **Not in Phase 0** — the op model it will sit on is here |
-| Timeline UI, inspector, preview rendering | **Phase 6–7** |
-| FFmpeg, audio extraction, transcription | **Phase 3–4** |
-| Export / libass | **Phase 8** |
+| Area                                                                                              | Status                                                   |
+| ------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Integer-millisecond timing with exact rational frame rates                                        | Done, tested at 30 / 29.97 / 60 fps                      |
+| Document model: assets, tracks, segments, words, style and animation registries                   | Done                                                     |
+| Stable, content-independent ID generation                                                         | Done                                                     |
+| Four-level style cascade (project → track → segment → word) with animation precedence             | Done                                                     |
+| Pure operation model (`moveSegment`, `retimeSegment`, `splitSegment`, `mergeSegments`, style ops) | Done                                                     |
+| Worker-result application, so workers never replace the client document                           | Done                                                     |
+| Structural validation (Zod) and semantic invariant validation (I-1…I-14)                          | Done                                                     |
+| Versioned migration foundation with future-version refusal                                        | Done                                                     |
+| Undo/redo UI, history panel, keyboard handling                                                    | **Not in Phase 0** — the op model it will sit on is here |
+| Timeline UI, inspector, preview rendering                                                         | **Phase 6–7**                                            |
+| FFmpeg, audio extraction, transcription                                                           | **Phase 3–4**                                            |
+| Export / libass                                                                                   | **Phase 8**                                              |
 
 ---
 
@@ -127,14 +127,14 @@ The document model declares twenty invariants. The load-bearing ones, all covere
 - **I-5** Every entity has a stable, unique ID — never an array index, never derived from
   content.
 - **I-6** `transforms` replaces on override; it does not merge.
-- **I-8** A segment's `text` is a cache of its words. Drift is *reported*, never silently
+- **I-8** A segment's `text` is a cache of its words. Drift is _reported_, never silently
   repaired.
 - **I-9** The document round-trips through JSON unchanged.
 - **I-14** `styleId` and `styleOverride` are mutually exclusive on one entity.
 - **I-19** Animation wins over a static transform for the same property, for its window;
   the static value resumes after.
 - **I-20** Every document mutation — including one originating in a worker — enters
-  through `core/ops` as a labelled operation. Workers return *results*; the client is the
+  through `core/ops` as a labelled operation. Workers return _results_; the client is the
   only writer of the document.
 
 ---
