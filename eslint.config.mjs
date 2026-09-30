@@ -96,10 +96,24 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
+    settings: {
+      react: { version: 'detect' },
+    },
     languageOptions: {
       parserOptions: {
         projectService: true,
         tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
+  {
+    // The browser layer is the only place JSX may appear. Enabling the parser feature
+    // here means a stray JSX file outside src/web is a parse error rather than something a
+    // reviewer has to notice.
+    files: ['src/web/**/*.{ts,tsx}'],
+    languageOptions: {
+      parserOptions: {
+        ecmaFeatures: { jsx: true },
       },
     },
   },
