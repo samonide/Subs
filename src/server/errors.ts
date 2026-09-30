@@ -36,6 +36,14 @@ export const ErrorCode = {
   TOOL_UNAVAILABLE: 'TOOL_UNAVAILABLE',
   /** ffprobe exceeded its wall-clock budget and was killed. */
   INSPECTION_TIMEOUT: 'INSPECTION_TIMEOUT',
+  /** ffmpeg could not be started, or exited non-zero. */
+  PROCESSING_FAILED: 'PROCESSING_FAILED',
+  /** ffmpeg reported success but the output was missing or unusable. */
+  OUTPUT_INVALID: 'OUTPUT_INVALID',
+  /** The named job does not exist. */
+  JOB_NOT_FOUND: 'JOB_NOT_FOUND',
+  /** The requested job cannot make the requested transition. */
+  INVALID_JOB_TRANSITION: 'INVALID_JOB_TRANSITION',
 } as const;
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];
@@ -82,16 +90,20 @@ export function httpStatusFor(code: ErrorCodeValue): number {
       return 413;
     case ErrorCode.PROJECT_NOT_FOUND:
     case ErrorCode.MISSING_ASSET:
+    case ErrorCode.JOB_NOT_FOUND:
       return 404;
     case ErrorCode.CANCELLED:
       return 499;
     case ErrorCode.TOOL_UNAVAILABLE:
     case ErrorCode.INSPECTION_TIMEOUT:
+    case ErrorCode.PROCESSING_FAILED:
       return 503;
     case ErrorCode.STORAGE_FAILURE:
     case ErrorCode.INSPECTION_FAILED:
+    case ErrorCode.OUTPUT_INVALID:
       return 500;
     case ErrorCode.INVALID_PROJECT:
+    case ErrorCode.INVALID_JOB_TRANSITION:
       return 422;
   }
 }
