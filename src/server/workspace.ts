@@ -169,6 +169,21 @@ export class WorkspaceLayout {
     return join(this.assetDir(projectId, assetId), 'metadata.json');
   }
 
+  /**
+   * Locate the stored file for an asset, given the extension recorded at ingest.
+   *
+   * The asset id alone is not enough: ingest names the file `original.<ext>`, and the
+   * extension is a property of the *asset*, so the caller supplies it from the project's
+   * record rather than guessing. Guessing here would be a silent failure mode — a `.mp4`
+   * stored as `original.mp4` would 404 just because the caller guessed `mov`.
+   *
+   * Note this takes an extension, never a path. There is no way to ask this layout for an
+   * arbitrary file.
+   */
+  assetFileForExtension(projectId: string, assetId: string, extension: string): string {
+    return this.assetFile(projectId, assetId, extension);
+  }
+
   /** A scratch path for in-progress work, removed once the real file is final. */
   tmpFile(label: string): string {
     assertSafeIdentifier(label, 'tmp label');

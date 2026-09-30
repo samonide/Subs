@@ -17,6 +17,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { ErrorCode, IngestError, httpStatusFor, isIngestError } from './errors.js';
 import { ingestMedia } from './media/ingest.js';
+import { serveMedia } from './media/serve.js';
 import { type ProjectStore } from './project/store.js';
 import { type WorkspaceLayout } from './workspace.js';
 
@@ -90,6 +91,14 @@ async function route(
   const segments = url.pathname.split('/').filter((part) => part.length > 0);
   const method = request.method ?? 'GET';
 
+  // GET|HEAD /media/:projectId/:assetId — streamed with Range support.
+  if (
+    segments[0] === 'media' &&
+    (await serveMedia(request, response, segments, config.layout, config.store))
+  ) {
+    return;
+  }
+
   // POST /api/projects  { name }
   if (
     method === 'POST' &&
@@ -114,6 +123,38 @@ async function route(
   ) {
     const ids = await config.store.list();
     sendJson(response, 200, { projectIds: ids });
+    return;
+  }
+
+  // GET /api/projects/:id/playback
+  //
+  // A deliberately narrow projection of the project: everything the browser needs to
+  // play, and nothing else. The full document is available at /api/projects/:id, but a
+  // player has no business receiving the whole model — and this route makes it
+  // structurally impossible for the client to depend on a filesystem path, because no path
+  // is ever included. The media URL is built from ids.
+  if (
+    method === 'GET' &&
+    segments.length === 4 &&
+    segments[0] === 'api' &&
+    segments[1] === 'projects' &&
+    segments[3] === 'playback'
+  ) {
+    const projectId = segments[2];
+    if (projectId === undefined) {
+      throw new IngestError(ErrorCode.INVALID_UPLOAD, 'Missing project id.');
+    }
+    const project = await config.store.load(projectId);
+    const video = project.assets.find((asset) => asset.role === 'sourceVideo');
+
+    sendJson(response, 200, {
+      projectId: project.id,
+      name: project.name,
+      // A project with no ingested video yet is a valid state, not an error: Phase 1 can
+      // create a project before anything is uploaded.
+      asset: video === undefined ? null : { assetId: video.id, meta: video.meta ?? null },
+      mediaUrl: video === undefined ? null : `/media/${project.id}/${video.id}`,
+    });
     return;
   }
 
@@ -210,7 +251,14 @@ async function route(
     };
     await config.store.save(updated);
 
-    sendJson(response, 201, { asset, filePath: result.filePath });
+    // The response carries only logical identifiers and canonical metadata. `result.filePath`
+    // is an absolute server path and must never cross the network: the browser addresses media
+    // by `/media/:projectId/:assetId`, which the server resolves to a path itself. Exposing it
+    // would leak the workspace layout and tie the client to the host's filesystem.
+    sendJson(response, 201, {
+      asset,
+      mediaUrl: `/media/${projectId}/${result.assetId}`,
+    });
     return;
   }
 
