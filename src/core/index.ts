@@ -17,4 +17,5 @@ export * from './validation/index.js';
 export * from './migration/index.js';
 export * from './ops/index.js';
 export * from './jobs/index.js';
+export * from './transcription/index.js';
 export * from './testing/factories.js';
