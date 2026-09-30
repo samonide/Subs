@@ -13,7 +13,7 @@
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
@@ -211,12 +211,22 @@ describe('core boundary', () => {
 });
 
 describe('phase 1 scope', () => {
-  it('keeps media and transcription out of the server layer', () => {
-    // Phase 1 runs ffprobe; it must not transcode (Phase 3), transcribe (Phase 4), or
-    // render/export (Phase 8). Those are separate, later capabilities.
-    const serverRoot = join(srcRoot, 'server');
-    expect(statSync(serverRoot).isDirectory()).toBe(true);
-    const files = collectFiles(serverRoot, ['.ts']);
+  const serverRoot = join(srcRoot, 'server');
+
+  it('keeps later-phase capabilities out of the ingest path', () => {
+    // Phase 1 ingests and inspects. Transcoding (Phase 3), transcription (Phase 4), and
+    // render/export (Phase 8) are separate capabilities. As each phase lands, its own
+    // directory is excluded here rather than the check being deleted — the ingest path must stay
+    // free of them, and that is still worth asserting.
+    // Paths are relative to the server root, matching `relative(serverRoot, file)`.
+    const LATER_PHASE_PATHS = ['transcription', 'media/audio.ts', 'media/ffmpeg.ts', 'jobs'];
+    const files = collectFiles(serverRoot, ['.ts']).filter((file) => {
+      const rel = relative(serverRoot, file).split(sep).join('/');
+      return !LATER_PHASE_PATHS.some(
+        (excluded) => rel === excluded || rel.startsWith(`${excluded}/`),
+      );
+    });
+
     for (const file of files) {
       const source = readFileSync(file, 'utf8');
       for (const pattern of [
@@ -284,36 +294,59 @@ describe('phase 2 scope', () => {
     }
   });
 
-  it('has no subtitle, transcription, or rendering implementation anywhere in src', () => {
-    // Phase 2 is playback only. The *implementations* belong to Phases 4–8; building any
-    // now would be exactly the scope creep the Agent Development Rules forbid.
+  it('adds no subtitle editing, styling, or rendering implementation', () => {
+    // Phases 0, 2, and 4 built the *shapes*: segment/word/style types, `applyWorkerResult`,
+    // ASS/SRT timecode helpers, a provider interface, and one provider adapter. Those are the
+    // correct groundwork and must not be flagged.
     //
-    // The check targets implementations, not vocabulary. Phases 0 and 2 legitimately
-    // contain an `applyWorkerResult` op labelled "Transcribe", ASS/SRT timecode helpers, and
-    // segment/style types — the shapes had to be settled before any provider or renderer
-    // existed, which is the whole point of separating shape from implementation. Matching
-    // the words would flag that correct groundwork, so the check looks for the actual
-    // machinery: a provider adapter, an HTTP call to a speech API, or an ffmpeg subtitle
-    // burn-in.
+    // What still does not exist is everything Phase 5 onwards: a timeline, a styling UI, a
+    // renderer, an ASS writer, an exporter. Those are what this asserts, so the gate keeps
+    // doing its job as the phase boundary moves.
     const forbidden: [RegExp, string][] = [
-      [/TranscriptionProvider/, 'a transcription provider interface'],
-      [/from\s*['"][^'"]*whisper[^'"]*['"]/i, 'a whisper package import'],
-      [/\bwhisper\(/i, 'a whisper invocation'],
-      [
-        /from\s*['"][^'"]*(openai|groq|deepgram|assemblyai|replicate)[^'"]*['"]/i,
-        'a hosted transcription SDK',
-      ],
-      [/\b(fast-xml-parser|xml2js)\b/, 'a subtitle XML parser'],
       [/\bsubtitles=/, 'an ffmpeg subtitle burn-in'],
       [/\bkaraoke/i, 'karaoke highlight rendering'],
       [/renderAss|writeAss|assDocumentFrom/, 'an ASS renderer'],
+      [/\bexportVideo|\brenderToFile\b/, 'a video exporter'],
+      [/\bfabric\b|\bkonva\b|\bremotion\b/i, 'a canvas or media editor library'],
     ];
     for (const file of collectFiles(srcRoot, ['.ts', '.tsx'])) {
-      const source = readFileSync(file, 'utf8');
+      const source = stripComments(readFileSync(file, 'utf8'));
       for (const [pattern, description] of forbidden) {
         expect(
           pattern.test(source),
           `${relative(projectRoot, file)} contains ${description} — that belongs to a later phase`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('keeps the provider boundary: core defines no provider implementations', () => {
+    // Core holds the interface and the normalizer — both pure. A concrete adapter means a
+    // dependency from core onto a network or a vendor, which would break the boundary the
+    // whole architecture rests on.
+    for (const file of collectFiles(join(srcRoot, 'core'), ['.ts'])) {
+      const source = readFileSync(file, 'utf8');
+      expect(
+        /from\s*['"][^'"]*(openai|whisper|deepgram|assemblyai|groq)/i.test(source),
+        `${relative(projectRoot, file)} imports a concrete provider into core`,
+      ).toBe(false);
+      expect(source, `${relative(projectRoot, file)} performs network I/O in core`).not.toMatch(
+        /\bfetch\s*\(/,
+      );
+    }
+  });
+
+  it('keeps vendor vocabulary inside the adapter', () => {
+    // `word`, `probability`, `verbose_json`, and `timestamp_granularities` are OpenAI's names.
+    // If any of them reaches core, the provider boundary has leaked and a second provider would
+    // have to fight the first one's vocabulary.
+    const vendorTerms = [/verbose_json/, /timestamp_granularities/, /\bprobability\b/];
+    for (const file of collectFiles(join(srcRoot, 'core'), ['.ts'])) {
+      const source = stripComments(readFileSync(file, 'utf8'));
+      for (const pattern of vendorTerms) {
+        expect(
+          pattern.test(source),
+          `${relative(projectRoot, file)} contains vendor term ${pattern} in core`,
         ).toBe(false);
       }
     }
@@ -385,14 +418,16 @@ describe('phase 2 scope', () => {
 });
 
 describe('phase 3 scope', () => {
-  it('adds no transcription, subtitle, or rendering capability', () => {
-    // Phase 3 ends at VIDEO → AUDIO → VERIFIED PROCESSING RESULT. Transcription is Phase 4,
-    // subtitle generation Phase 5, rendering Phase 8.
+  it('keeps transcription, subtitle, and rendering out of the media pipeline', () => {
+    // Phase 3's job was VIDEO → AUDIO → VERIFIED PROCESSING RESULT. Phase 4 added transcription
+    // in `server/transcription/`, so that directory is now legitimate — but the *media* pipeline
+    // must stay exactly as narrow as Phase 3 left it: extraction knows nothing about
+    // speech-to-text, and knows nothing about subtitles or rendering.
     //
-    // Comments are stripped before matching. Prose about *why* audio duration matters mentions
-    // subtitles, and a check that flags its own documentation would train the next agent to
-    // write vaguer comments — or to delete the explanation that makes the code reviewable.
-    const files = collectFiles(join(srcRoot, 'server'), ['.ts']);
+    // Comments are stripped before matching, because prose about *why* audio duration matters
+    // mentions subtitles, and a check that flags its own documentation trains the next agent to
+    // delete the explanation that makes the code reviewable.
+    const files = collectFiles(join(srcRoot, 'server', 'media'), ['.ts']);
     for (const file of files) {
       const code = stripComments(readFileSync(file, 'utf8'));
       // Patterns name *machinery*, not vocabulary. A plain /subtitle/i would flag the error
@@ -402,7 +437,6 @@ describe('phase 3 scope', () => {
         /\bwhisper\b/i,
         /\bfaster-whisper\b/i,
         /\btranscrib/i,
-        /\bfrom\s+['"][^'"]*(subtitle|transcrib|render-ass)/i,
         /subtitles=\S/,
         /\bass=\S/,
         /force_style/,
@@ -459,12 +493,16 @@ describe('phase 3 scope', () => {
     }
   });
 
-  it('defines exactly one job type', () => {
+  it('defines exactly the job types the completed phases need', () => {
     // JobType exists so later phases add types in one place rather than scattering strings.
-    // Adding one now would be implementing a later phase.
+    // This assertion is the phase gate: it fails when a new capability lands, prompting a
+    // deliberate update rather than a silent widening of the job surface.
+    //
+    // Phases 0–3 shipped exactly one (audio extraction). Phase 4 added transcription. Nothing
+    // beyond that is implemented, so nothing beyond that may be declared.
     const types = readFileSync(join(srcRoot, 'core', 'jobs', 'types.ts'), 'utf8');
     const block = /export const JobType = \{([^}]*)\}/s.exec(types)?.[1] ?? '';
     const entries = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]);
-    expect(entries).toEqual(['media.audio-extract']);
+    expect(entries).toEqual(['media.audio-extract', 'transcription.transcribe']);
   });
 });

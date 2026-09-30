@@ -139,6 +139,10 @@ export default tseslint.config(
     files: ['tests/**/*.ts', '*.config.ts'],
     rules: {
       'no-restricted-imports': 'off',
+      // A test double that resolves synchronously is the clearest possible statement of what
+      // it does. Requiring a fabricated `await` inside it would add noise to satisfy a rule
+      // about production code, so the rule stays where it earns its keep: in `src/`.
+      '@typescript-eslint/require-await': 'off',
     },
   },
   {
