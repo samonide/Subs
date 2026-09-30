@@ -1,0 +1,254 @@
+/**
+ * Minimal HTTP intake for Phase 1.
+ *
+ * Deliberately **not** Fastify: D-7b deferred that decision, and the brief says not to
+ * force a framework in merely because ingestion now needs a server. The Phase 1 surface is
+ * three routes, and `node:http` plus these ~150 lines is proportionate. If the surface
+ * grows, the framework question is revisited on evidence rather than by default.
+ *
+ * What this layer must get right (S-4, S-14):
+ *   - it **streams** the body; it never buffers it;
+ *   - it enforces the declared size cap while streaming;
+ *   - it binds to `127.0.0.1` only, because there is no authentication;
+ *   - it turns typed `IngestError`s into structured JSON, never a stack trace.
+ */
+
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+
+import { ErrorCode, IngestError, httpStatusFor, isIngestError } from './errors.js';
+import { ingestMedia } from './media/ingest.js';
+import { type ProjectStore } from './project/store.js';
+import { type WorkspaceLayout } from './workspace.js';
+
+export interface ServerConfig {
+  layout: WorkspaceLayout;
+  store: ProjectStore;
+  maxFileBytes: number;
+  probeTimeoutMs?: number;
+  /** Interface to bind. Defaults to loopback: without auth, this must not be reachable. */
+  host?: string;
+}
+
+/**
+ * Read a small JSON body with a hard cap.
+ *
+ * A cap is essential: an unbounded JSON read is an unbounded memory read, which is the same
+ * class of bug the upload path is built to avoid.
+ */
+async function readJsonBody(request: IncomingMessage, limitBytes = 1_000_000): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = chunk as Buffer;
+    size += buffer.byteLength;
+    if (size > limitBytes) {
+      throw new IngestError(ErrorCode.INVALID_UPLOAD, 'Request body is too large.');
+    }
+    chunks.push(buffer);
+  }
+  if (chunks.length === 0) return undefined;
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  } catch (error) {
+    throw new IngestError(ErrorCode.INVALID_UPLOAD, 'Request body is not valid JSON.', {
+      cause: error,
+    });
+  }
+}
+
+function sendJson(response: ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  response.writeHead(status, {
+    'content-type': 'application/json',
+    'content-length': Buffer.byteLength(payload),
+  });
+  response.end(payload);
+}
+
+function sendError(response: ServerResponse, error: unknown): void {
+  if (isIngestError(error)) {
+    sendJson(response, httpStatusFor(error.code), { error: error.toJSON() });
+    return;
+  }
+  // An unexpected error must not leak a stack trace to a client, and must not take the
+  // process down.
+  sendJson(response, 500, {
+    error: {
+      code: 'INTERNAL',
+      message: 'Something went wrong handling this request.',
+      retryable: true,
+    },
+  });
+}
+
+async function route(
+  config: ServerConfig,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+  const segments = url.pathname.split('/').filter((part) => part.length > 0);
+  const method = request.method ?? 'GET';
+
+  // POST /api/projects  { name }
+  if (
+    method === 'POST' &&
+    segments.length === 2 &&
+    segments[0] === 'api' &&
+    segments[1] === 'projects'
+  ) {
+    const body = (await readJsonBody(request)) as { name?: unknown } | undefined;
+    const name =
+      typeof body?.name === 'string' && body.name.length > 0 ? body.name : 'Untitled project';
+    const doc = await config.store.create(name.slice(0, 200));
+    sendJson(response, 201, { project: doc });
+    return;
+  }
+
+  // GET /api/projects
+  if (
+    method === 'GET' &&
+    segments.length === 2 &&
+    segments[0] === 'api' &&
+    segments[1] === 'projects'
+  ) {
+    const ids = await config.store.list();
+    sendJson(response, 200, { projectIds: ids });
+    return;
+  }
+
+  // GET /api/projects/:id
+  if (
+    method === 'GET' &&
+    segments.length === 3 &&
+    segments[0] === 'api' &&
+    segments[1] === 'projects'
+  ) {
+    const projectId = segments[2];
+    if (projectId === undefined)
+      throw new IngestError(ErrorCode.INVALID_UPLOAD, 'Missing project id.');
+    sendJson(response, 200, { project: await config.store.load(projectId) });
+    return;
+  }
+
+  // PUT /api/projects/:id  (the document itself)
+  if (
+    method === 'PUT' &&
+    segments.length === 3 &&
+    segments[0] === 'api' &&
+    segments[1] === 'projects'
+  ) {
+    const projectId = segments[2];
+    if (projectId === undefined)
+      throw new IngestError(ErrorCode.INVALID_UPLOAD, 'Missing project id.');
+    const body = await readJsonBody(request, 20_000_000);
+    if (typeof body !== 'object' || body === null) {
+      throw new IngestError(ErrorCode.INVALID_PROJECT, 'Request body is not a project document.');
+    }
+    const doc = body as { id?: unknown };
+    if (doc.id !== projectId) {
+      throw new IngestError(
+        ErrorCode.INVALID_PROJECT,
+        'Project id in the document does not match the URL.',
+      );
+    }
+    await config.store.save(body as never);
+    sendJson(response, 200, { project: body });
+    return;
+  }
+
+  // POST /api/projects/:id/assets  (raw body upload, headers carry the name and type)
+  if (
+    method === 'POST' &&
+    segments.length === 4 &&
+    segments[0] === 'api' &&
+    segments[1] === 'projects' &&
+    segments[3] === 'assets'
+  ) {
+    const projectId = segments[2];
+    if (projectId === undefined)
+      throw new IngestError(ErrorCode.INVALID_UPLOAD, 'Missing project id.');
+
+    // Confirm the project exists before accepting any bytes.
+    const project = await config.store.load(projectId);
+
+    const filenameHeader = request.headers['x-filename'];
+    const filename = decodeURIComponent(typeof filenameHeader === 'string' ? filenameHeader : '');
+    const contentType = request.headers['content-type'];
+    const mimeType = typeof contentType === 'string' ? contentType : undefined;
+    if (filename.length === 0) {
+      throw new IngestError(
+        ErrorCode.INVALID_UPLOAD,
+        'Missing the original filename (X-Filename header).',
+      );
+    }
+
+    const result = await ingestMedia(
+      config.layout,
+      projectId,
+      { stream: request, originalFilename: filename, declaredMimeType: mimeType },
+      {
+        maxFileBytes: config.maxFileBytes,
+        ...(config.probeTimeoutMs === undefined ? {} : { probeTimeoutMs: config.probeTimeoutMs }),
+      },
+    );
+
+    // Only now does the document learn about the asset: an asset that failed to ingest
+    // must never be referenced by a persisted project.
+    const asset = {
+      id: result.assetId,
+      role: 'sourceVideo' as const,
+      filename: result.displayName,
+      mimeType: `video/${result.extension === 'mkv' ? 'x-matroska' : result.extension}`,
+      byteSize: result.byteSize,
+      meta: result.meta,
+    };
+    const updated = {
+      ...project,
+      assets: [...project.assets, asset],
+      updatedAt: new Date().toISOString(),
+    };
+    await config.store.save(updated);
+
+    sendJson(response, 201, { asset, filePath: result.filePath });
+    return;
+  }
+
+  throw new IngestError(ErrorCode.INVALID_UPLOAD, `No route for ${method} ${url.pathname}.`);
+}
+
+export function createIngestServer(config: ServerConfig): Server {
+  return createServer((request, response) => {
+    route(config, request, response).catch((error: unknown) => sendError(response, error));
+  });
+}
+
+export interface StartedServer {
+  server: Server;
+  url: string;
+  close: () => Promise<void>;
+}
+
+/** Start the server on loopback unless explicitly told otherwise. */
+export function startIngestServer(config: ServerConfig, port = 0): Promise<StartedServer> {
+  const server = createIngestServer(config);
+  const host = config.host ?? '127.0.0.1';
+  return new Promise<StartedServer>((resolvePromise, rejectPromise) => {
+    server.on('error', rejectPromise);
+    server.listen(port, host, () => {
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        rejectPromise(new Error('Server did not bind to a TCP port'));
+        return;
+      }
+      resolvePromise({
+        server,
+        url: `http://${host}:${address.port}`,
+        close: () =>
+          new Promise<void>((done, fail) => {
+            server.close((error) => (error === undefined ? done() : fail(error)));
+          }),
+      });
+    });
+  });
+}
