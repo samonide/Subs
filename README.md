@@ -31,6 +31,7 @@ both the browser preview and the Node export worker call, so the two cannot drif
 - **Architecture (canonical decisions and models):** [`ARCHITECTURE_REVIEW.md`](ARCHITECTURE_REVIEW.md)
 - **Implementation phases:** [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)
 - **Editor design principles:** [`DESIGN_PRINCIPLES.md`](DESIGN_PRINCIPLES.md)
+- **Phase notes:** [1](docs/PHASE1.md) · [2](docs/PHASE2.md) · [3](docs/PHASE3.md) · [4](docs/PHASE4.md)
 
 `ARCHITECTURE_REVIEW.md` is canonical. Where it and `ARCHITECTURE.md` disagree, the review
 wins.
@@ -175,6 +176,64 @@ Phase 1 details: [`docs/PHASE1.md`](docs/PHASE1.md).
 | Subtitle, timeline, styling, export                            | Later phases                                       |
 
 Phase 2 details: [`docs/PHASE2.md`](docs/PHASE2.md).
+
+**Phase 3 — Audio Extraction & Media Processing** (infrastructure, `src/server`)
+
+| Area                                                       | Status                                          |
+| ---------------------------------------------------------- | ----------------------------------------------- |
+| Job domain model and state machine, pure, in `core`        | Done — terminal states absorb late callbacks    |
+| Persistent job store with atomic writes and crash recovery | Done — recovery runs on the real entry point    |
+| Single-slot worker: one media job at a time                | Done, intentionally                             |
+| FFmpeg adapter: one file builds all argv, no shell         | Done, asserted by a boundary test               |
+| Canonical audio: 16 kHz mono PCM WAV                       | Done, measured duration agreement within 250 ms |
+| Temp-then-rename; a failed run cannot become an asset      | Done, verified live                             |
+| Deterministic + indeterminate progress, cancellation       | Done                                            |
+| Transcription, subtitles, rendering                        | Later phases                                    |
+
+Phase 3 details: [`docs/PHASE3.md`](docs/PHASE3.md).
+
+**Phase 4 — Transcription** (`src/core/transcription`, `src/server/transcription`)
+
+| Area                                                                    | Status                                                  |
+| ----------------------------------------------------------------------- | ------------------------------------------------------- |
+| `TranscriptionProvider` interface + canonical result types, in `core`   | Done, no vendor vocabulary                              |
+| OpenAI adapter (`whisper-1`, for word timestamps) behind that interface | Done, verified against recorded + live local responses  |
+| Pure normalizer: integer-ms, sorting, confidence, timing honesty        | Done — rejects rather than silently repairing           |
+| Absent confidence stays absent, distinct from a real zero               | Done, asserted through a JSON round trip                |
+| `measured` vs `synthesized` timing preserved; nothing synthesized       | Done                                                    |
+| Pure document-writing operation with provenance                         | Done, one undo entry for a whole transcript             |
+| Re-transcription refuses over manual work, and names the count          | Done — no merge engine, deliberately                    |
+| Transcription job reuses the Phase 3 worker and store                   | Done, no second queue                                   |
+| Worker never writes `ProjectDocument` (I-20)                            | Done, verified live and by a regression test            |
+| **Real OpenAI API call**                                                | **Not performed — no `OPENAI_API_KEY` on this machine** |
+| Timeline, segment editing, styling, export                              | Later phases                                            |
+
+Phase 4 details: [`docs/PHASE4.md`](docs/PHASE4.md).
+
+---
+
+## Running transcription
+
+Set one environment variable and use the HTTP API:
+
+```bash
+export OPENAI_API_KEY=sk-...          # required; the app runs without it
+export OPENAI_TRANSCRIBE_MODEL=whisper-1   # optional; the only model with word timestamps
+export SUBS_WORKSPACE=./workspace     # optional; defaults beside src/
+```
+
+The app starts and serves media and playback with **no** API key. Transcription requests return a
+clear `503 not-configured` rather than failing at startup.
+
+```bash
+# 1. Upload a video, 2. extract audio, 3. transcribe, 4. poll
+curl -X POST localhost:4199/api/projects/$P/assets/$VIDEO/audio
+curl -X POST localhost:4199/api/projects/$P/assets/$AUDIO/transcribe -d '{"granularity":"word"}'
+curl localhost:4199/api/jobs/$JOB/result
+```
+
+Step 4 returns the canonical result. Applying it to a project is a **client-side** operation —
+the server never writes `project.json` (invariant I-20).
 
 ---
 
