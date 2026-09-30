@@ -69,6 +69,18 @@ function collectFiles(dir: string, extensions: string[]): string[] {
   return found;
 }
 
+/**
+ * Strip comments from TypeScript source.
+ *
+ * Several scope checks assert that a capability is *absent*. Without this, a comment
+ * explaining why a duration check matters would register as an implementation of subtitles —
+ * and the fix an agent reaches for is to delete the explanation. Matching code rather than
+ * prose is what keeps these checks usable as documentation grows.
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
 /** Match static and dynamic import/require specifiers in emitted JS. */
 function importedSpecifiers(source: string): string[] {
   const specifiers: string[] = [];
@@ -224,19 +236,19 @@ describe('phase 1 scope', () => {
     }
   });
 
-  it('never spawns ffmpeg — only ffprobe, which is read-only', () => {
-    // Phase 1 inspects media. It must not invoke the ffmpeg binary, which is what
-    // transcoding and export would use.
-    const files = collectFiles(join(srcRoot, 'server'), ['.ts']);
-    for (const file of files) {
+  it('spawns ffmpeg only from the Phase 3 media adapter', () => {
+    // Phase 1 was read-only (ffprobe only). Phase 3 legitimately introduced transcoding for
+    // audio extraction — but only in one adapter. Concentrating argv construction in a single
+    // file is what makes the "safe argument array" claim auditable, so the check is not
+    // "ffmpeg appears nowhere" but "ffmpeg appears in exactly one place".
+    const offenders: string[] = [];
+    for (const file of collectFiles(join(srcRoot, 'server'), ['.ts'])) {
       const source = readFileSync(file, 'utf8');
-      expect(source.includes("'ffmpeg'"), `${relative(projectRoot, file)} spawns ffmpeg`).toBe(
-        false,
-      );
-      expect(source.includes('"ffmpeg"'), `${relative(projectRoot, file)} spawns ffmpeg`).toBe(
-        false,
-      );
+      if (source.includes("'ffmpeg'") || source.includes('"ffmpeg"')) {
+        offenders.push(relative(projectRoot, file));
+      }
     }
+    expect(offenders).toEqual(['src/server/media/ffmpeg.ts']);
   });
 
   it('does not depend on a web framework', () => {
@@ -369,5 +381,90 @@ describe('phase 2 scope', () => {
     expect(proxyPort, 'SERVER_PORT not found in vite.config.ts').toBeDefined();
 
     expect(proxyPort, 'dev proxy and API server must use the same port').toBe(serverPort);
+  });
+});
+
+describe('phase 3 scope', () => {
+  it('adds no transcription, subtitle, or rendering capability', () => {
+    // Phase 3 ends at VIDEO → AUDIO → VERIFIED PROCESSING RESULT. Transcription is Phase 4,
+    // subtitle generation Phase 5, rendering Phase 8.
+    //
+    // Comments are stripped before matching. Prose about *why* audio duration matters mentions
+    // subtitles, and a check that flags its own documentation would train the next agent to
+    // write vaguer comments — or to delete the explanation that makes the code reviewable.
+    const files = collectFiles(join(srcRoot, 'server'), ['.ts']);
+    for (const file of files) {
+      const code = stripComments(readFileSync(file, 'utf8'));
+      // Patterns name *machinery*, not vocabulary. A plain /subtitle/i would flag the error
+      // string that explains why a duration mismatch matters — and the fix an agent reaches
+      // for is to delete the one message a user would actually understand.
+      for (const pattern of [
+        /\bwhisper\b/i,
+        /\bfaster-whisper\b/i,
+        /\btranscrib/i,
+        /\bfrom\s+['"][^'"]*(subtitle|transcrib|render-ass)/i,
+        /subtitles=\S/,
+        /\bass=\S/,
+        /force_style/,
+        /\blibass\b/i,
+        /-c:v\s+libx264/,
+        /\bSubtitleSegment\b|\bSubtitleTrack\b|\bSubtitleWord\b/,
+      ]) {
+        expect(
+          pattern.test(code),
+          `${relative(projectRoot, file)} matches ${pattern} — that belongs to a later phase`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('keeps the job domain model in core, free of Node and the filesystem', () => {
+    // Job types and the state machine are domain logic: the browser may want to render job
+    // status, and a future phase may want to run the same transition logic off the server.
+    // Putting them in the server would make that impossible.
+    const jobsDir = join(srcRoot, 'core', 'jobs');
+    expect(statSync(jobsDir).isDirectory()).toBe(true);
+    for (const file of collectFiles(jobsDir, ['.ts'])) {
+      const code = stripComments(readFileSync(file, 'utf8'));
+      expect(code).not.toMatch(/from 'node:/);
+      // Timestamps are injected by the caller so transitions stay deterministic; a clock read
+      // here would make the same inputs produce different records on every run.
+      expect(code).not.toMatch(/Date\.now/);
+      expect(code).not.toMatch(/new Date\(/);
+    }
+  });
+
+  it('keeps worker and job persistence out of core', () => {
+    // The dependency direction: core knows nothing about jobs' *execution*. Only the pure
+    // model lives there.
+    const coreFiles = collectFiles(join(srcRoot, 'core'), ['.ts']);
+    for (const file of coreFiles) {
+      const source = readFileSync(file, 'utf8');
+      expect(source).not.toMatch(/child_process/);
+      expect(source).not.toMatch(/'ffmpeg'/);
+    }
+  });
+
+  it('spawns no subprocess through a shell', () => {
+    // An argument array plus a default (non-shell) spawn means a filename cannot become a
+    // command. `shell: true` anywhere would void that guarantee entirely.
+    for (const file of collectFiles(join(srcRoot, 'server'), ['.ts'])) {
+      const source = readFileSync(file, 'utf8');
+      expect(
+        /shell:\s*true/.test(source),
+        `${relative(projectRoot, file)} enables shell execution`,
+      ).toBe(false);
+      expect(source).not.toMatch(/execSync/);
+      expect(source).not.toMatch(/`\$\{[^}]*\}\s*ffmpeg/);
+    }
+  });
+
+  it('defines exactly one job type', () => {
+    // JobType exists so later phases add types in one place rather than scattering strings.
+    // Adding one now would be implementing a later phase.
+    const types = readFileSync(join(srcRoot, 'core', 'jobs', 'types.ts'), 'utf8');
+    const block = /export const JobType = \{([^}]*)\}/s.exec(types)?.[1] ?? '';
+    const entries = [...block.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    expect(entries).toEqual(['media.audio-extract']);
   });
 });
