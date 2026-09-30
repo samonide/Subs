@@ -133,6 +133,7 @@ export class WorkspaceLayout {
   ensure(): void {
     mkdirSync(this.projectsDir, { recursive: true });
     mkdirSync(this.tmpDir, { recursive: true });
+    mkdirSync(this.jobsDir, { recursive: true });
   }
 
   projectDir(projectId: string): string {
@@ -188,5 +189,48 @@ export class WorkspaceLayout {
   tmpFile(label: string): string {
     assertSafeIdentifier(label, 'tmp label');
     return join(this.tmpDir, label);
+  }
+
+  /**
+   * A job record file, stored **outside** any project directory.
+   *
+   * Deliberate: jobs are volatile runtime state, not part of a project's durable truth. If
+   * job records lived inside `projects/<id>/`, a project could be copied, backed up, or
+   * committed with a stale `"status": "processing"` attached, and every consumer of that
+   * directory would have to know which files are load-bearing (invariant I-20).
+   *
+   * The file name is the job id, which the caller generates. No user string reaches the
+   * path: `assertSafeIdentifier` runs first, so traversal is rejected before `join`.
+   */
+  jobFile(jobId: string): string {
+    assertSafeIdentifier(jobId, 'jobId');
+    const dir = join(this.jobsDir, jobId);
+    return join(dir, 'job.json');
+  }
+
+  get jobsDir(): string {
+    return join(this.root, 'jobs');
+  }
+
+  jobDir(jobId: string): string {
+    assertSafeIdentifier(jobId, 'jobId');
+    const dir = join(this.jobsDir, jobId);
+    return assertInsideRoot(this.jobsDir, dir);
+  }
+
+  /**
+   * A temp path inside a job's own directory, so a crashed write cannot be mistaken for one.
+   *
+   * The label is **not** validated as an identifier: unlike `jobId`, it never comes from
+   * outside the process — it is a literal this module owns. `assertSafeIdentifier` is the
+   * right check for caller-supplied input and the wrong one here, where it would reject the
+   * dot-prefixed temp name this method exists to produce.
+   */
+  jobTempFile(jobId: string, label: string): string {
+    assertSafeIdentifier(jobId, 'jobId');
+    if (label.length === 0 || label.includes('/') || label.includes('\\')) {
+      throw new IngestError(ErrorCode.PATH_VIOLATION, 'Unsafe job temp label.');
+    }
+    return join(this.jobDir(jobId), label);
   }
 }
