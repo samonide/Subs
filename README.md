@@ -3,15 +3,15 @@
 Subtitle generation and editing core. A short video goes in; accurately timed, styled
 subtitles come out, and a human can correct and restyle them through a visual editor.
 
-**Current state: Phase 1 — Ingest & Project Persistence.**
+**Current state: Phase 2 — Playback & Time Base.**
 
-The repository contains the **pure domain layer** (`src/core`) and the **ingest and
-persistence layer** (`src/server`). A video can be streamed to controlled storage, probed,
-normalised into canonical metadata, registered as an asset, and persisted in a validated
-project document.
+The repository contains the **pure domain layer** (`src/core`), the **ingest and persistence
+layer** (`src/server`), and a **minimal browser playback client** (`src/web`). A video can be
+streamed to controlled storage, probed into canonical metadata, played back in the browser
+through a Range-capable endpoint, and stepped frame-accurately using exact rational timing.
 
-There is deliberately **no user interface, no transcription, no subtitle generation, no
-timeline, and no rendering/export** — those arrive in later phases, each gated on the layer
+There is deliberately **no transcription, no subtitle generation, no timeline, no styling
+editor, and no rendering/export** — those arrive in later phases, each gated on the layer
 beneath it being correct.
 
 ---
@@ -43,26 +43,33 @@ Requires Node 22+ (developed on 26.10) and pnpm.
 
 ```bash
 pnpm install        # install dependencies
-pnpm verify         # typecheck + lint + format check + tests  (run this)
+pnpm verify         # typecheck + lint + format check + tests + build   (run this)
 ```
 
 Individual steps:
 
-| Command             | Purpose                                  |
-| ------------------- | ---------------------------------------- |
-| `pnpm build`        | Compile TypeScript to `dist/`            |
-| `pnpm typecheck`    | Type-check without emitting              |
-| `pnpm test`         | Run the test suite once                  |
-| `pnpm test:watch`   | Run tests in watch mode                  |
-| `pnpm lint`         | ESLint, including the core-boundary rule |
-| `pnpm lint:fix`     | ESLint with autofix                      |
-| `pnpm format`       | Rewrite files with Prettier              |
-| `pnpm format:check` | Verify formatting without writing        |
-| `pnpm clean`        | Remove build output                      |
+| Command             | Purpose                                   |
+| ------------------- | ----------------------------------------- |
+| `pnpm dev`          | Vite dev server for the browser app       |
+| `pnpm dev:server`   | Compile and run the API/media server      |
+| `pnpm dev:web`      | Vite dev server (same as `pnpm dev`)      |
+| `pnpm build`        | Compile TypeScript and bundle the browser |
+| `pnpm typecheck`    | Type-check without emitting               |
+| `pnpm test`         | Run the test suite once                   |
+| `pnpm test:watch`   | Run tests in watch mode                   |
+| `pnpm lint`         | ESLint, including the core-boundary rule  |
+| `pnpm lint:fix`     | ESLint with autofix                       |
+| `pnpm format`       | Rewrite files with Prettier               |
+| `pnpm format:check` | Verify formatting without writing         |
+| `pnpm clean`        | Remove build output                       |
 
 > `pnpm verify` runs the full gate. The core-boundary test inspects compiled output, so
 > run `pnpm build` before `pnpm test` if you have only changed sources — `pnpm verify` does
-> this for you via the typecheck step.
+> this for you.
+
+The API server listens on loopback only and serves the media endpoint. It is not started by
+`pnpm dev`; run `pnpm dev:server` in a second terminal when you need real media. Vite proxies
+`/api` and `/media` to it (see `vite.config.ts`).
 
 ---
 
@@ -82,8 +89,17 @@ src/
     workspace.ts        # Controlled storage paths, identifier and symlink safety
     errors.ts           # Structured, typed error model
     project/store.ts    # Project CRUD with atomic writes and migration on load
-    media/              # Filename/type validation, ffprobe adapter, streamed ingest
-    http.ts             # Minimal node:http intake (no framework — see docs/PHASE1.md)
+    media/              # Filename/type validation, ffprobe adapter, streamed ingest,
+                        # Range parsing, streamed serving
+    http.ts             # Minimal node:http routes (no framework — see docs/PHASE1.md)
+    main.ts             # Entry point; loopback only
+  web/                  # Browser client. Consumes core; depends on no Node API.
+    App.tsx             # The single surface — a transport, not the editor
+    api.ts              # Fetches the playback descriptor by logical id
+    storage.ts          # Remembers the last project (optional, fails quietly)
+    playback/
+      time.ts           # The single seconds ↔ ms conversion boundary
+      clock.ts          # Playback clock; the video element is authoritative
   index.ts              # Public surface of core
 tests/                  # Vitest suites
 docs/                   # Phase reference documentation
@@ -135,13 +151,30 @@ convention, and a convention is a rule that breaks by Phase 6.
 | Typed error model, structured HTTP responses              | Done                                      |
 | Security controls S-1 … S-7                               | Done, each covered by tests               |
 | Undo/redo UI, history panel, keyboard handling            | Not yet — the op model it sits on is done |
-| Video playback, `/media` Range endpoint                   | Phase 2                                   |
 | Audio extraction, jobs, progress                          | Phase 3                                   |
 | Transcription                                             | Phase 4                                   |
 | Timeline UI, inspector, preview                           | Phase 6–7                                 |
 | Export / libass                                           | Phase 8                                   |
 
 Phase 1 details: [`docs/PHASE1.md`](docs/PHASE1.md).
+
+**Phase 2 — Playback & Time Base** (browser client, `src/web`)
+
+| Area                                                           | Status                                             |
+| -------------------------------------------------------------- | -------------------------------------------------- |
+| React + Vite application shell with a single transport surface | Done, deliberately minimal                         |
+| `GET /media/:projectId/:assetId` with correct Range support    | Done, verified byte-for-byte against real media    |
+| Streamed from disk, never buffered                             | Done                                               |
+| One conversion boundary, seconds → canonical integer ms        | Done, asserted to exist in exactly one file        |
+| Playback clock with the video element authoritative            | Done, rAF only while playing                       |
+| Eight-value playback state, no redundant or impossible states  | Done                                               |
+| Frame stepping from exact rational FPS (30 / 29.97 / 60)       | Done                                               |
+| Browser never receives a server filesystem path                | Done, enforced by tests                            |
+| `Space` / `←` / `→` keyboard transport                         | Done                                               |
+| Variable frame rate frame stepping                             | **Disabled and explained** — no frame index exists |
+| Subtitle, timeline, styling, export                            | Later phases                                       |
+
+Phase 2 details: [`docs/PHASE2.md`](docs/PHASE2.md).
 
 ---
 
