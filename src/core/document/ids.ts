@@ -66,6 +66,11 @@ export type SegmentId = string;
 export type WordId = string;
 export type StyleId = string;
 export type AnimationId = string;
+/**
+ * Jobs live outside the document (I-20) but are still core-identified, so an id minted here
+ * works unchanged in the browser, the server, and a worker.
+ */
+export type JobId = string;
 
 export const newProjectId = (): ProjectId => generateId();
 export const newAssetId = (): AssetId => generateId();
@@ -74,6 +79,7 @@ export const newSegmentId = (): SegmentId => generateId();
 export const newWordId = (): WordId => generateId();
 export const newStyleId = (): StyleId => generateId();
 export const newAnimationId = (): AnimationId => generateId();
+export const newJobId = (): JobId => generateId();
 
 /** Test-only: reset the counter so ID generation is reproducible within a test file. */
 export function __resetIdCounterForTests(): void {
