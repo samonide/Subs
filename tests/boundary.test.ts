@@ -153,6 +153,22 @@ describe('core boundary', () => {
     }
   });
 
+  it('does not import the infrastructure layer (dependency direction)', () => {
+    // Infrastructure may consume core — that is how the server uses the document model.
+    // Core may never consume infrastructure: an import of `server` from `core` would let
+    // a filesystem or process dependency leak back into the pure layer, which is the one
+    // direction that breaks the browser-preview / export-worker parity mechanism.
+    for (const file of collectFiles(coreRoot, ['.ts'])) {
+      const source = readFileSync(file, 'utf8');
+      for (const specifier of importedSpecifiers(source)) {
+        expect(
+          specifier.includes('server'),
+          `${relative(projectRoot, file)} imports "${specifier}" — core must not depend on infrastructure.`,
+        ).toBe(false);
+      }
+    }
+  });
+
   it('uses no browser DOM globals', () => {
     const files = collectFiles(distCoreRoot, ['.js']);
     for (const file of files) {
@@ -182,41 +198,75 @@ describe('core boundary', () => {
   });
 });
 
-describe('phase 0 scope', () => {
-  it('contains no UI or server directories in src', () => {
-    // Phase 0 is pure domain logic. These arrive in later phases; creating them now
-    // would be speculative structure with no consumer.
-    for (const forbidden of ['web', 'server', 'ui', 'components', 'routes', 'api']) {
+describe('phase 1 scope', () => {
+  it('contains no UI directories in src', () => {
+    // The web app arrives in Phase 7. Creating it now would be speculative structure
+    // with no consumer.
+    for (const forbidden of ['web', 'ui', 'components', 'routes']) {
       let exists = true;
       try {
         statSync(join(srcRoot, forbidden));
       } catch {
         exists = false;
       }
-      expect(exists, `${forbidden}/ should not exist in Phase 0`).toBe(false);
+      expect(exists, `${forbidden}/ should not exist yet`).toBe(false);
     }
   });
 
-  it('contains no media tooling or transcription integration in src', () => {
-    // Detects the *call*, not the word: a mere mention in a comment (such as the note
-    // that ffmpeg must be a spawned binary) is fine, actually invoking it is not.
-    const files = collectFiles(srcRoot, ['.ts']);
-    const forbidden = [
-      /\bspawn\s*\(/,
-      /\bexecFile\s*\(/,
-      /\bexecSync\s*\(/,
-      /\bffprobe\b/,
-      /from\s*['"][^'"]*ffmpeg[^'"]*['"]/,
-      /new\s+TranscriptionProvider\b/,
-    ];
+  it('keeps media and transcription out of the server layer', () => {
+    // Phase 1 runs ffprobe; it must not transcode (Phase 3), transcribe (Phase 4), or
+    // render/export (Phase 8). Those are separate, later capabilities.
+    const serverRoot = join(srcRoot, 'server');
+    expect(statSync(serverRoot).isDirectory()).toBe(true);
+    const files = collectFiles(serverRoot, ['.ts']);
     for (const file of files) {
       const source = readFileSync(file, 'utf8');
-      for (const pattern of forbidden) {
+      for (const pattern of [
+        /\btranscrib/i,
+        /\bfaster-whisper\b/i,
+        /\bwhisper\b/i,
+        /\bsrt\b(?![a-z])/i,
+        /\bvtt\b(?![a-z])/i,
+        /\bsubtitles=\S/,
+        /\bexport\b\s*=\s*['"]video/,
+      ]) {
         expect(
           pattern.test(source),
           `${relative(projectRoot, file)} matches ${pattern} — that belongs to a later phase`,
         ).toBe(false);
       }
+    }
+  });
+
+  it('never spawns ffmpeg — only ffprobe, which is read-only', () => {
+    // Phase 1 inspects media. It must not invoke the ffmpeg binary, which is what
+    // transcoding and export would use.
+    const files = collectFiles(join(srcRoot, 'server'), ['.ts']);
+    for (const file of files) {
+      const source = readFileSync(file, 'utf8');
+      expect(source.includes("'ffmpeg'"), `${relative(projectRoot, file)} spawns ffmpeg`).toBe(
+        false,
+      );
+      expect(source.includes('"ffmpeg"'), `${relative(projectRoot, file)} spawns ffmpeg`).toBe(
+        false,
+      );
+    }
+  });
+
+  it('does not depend on a web framework in Phase 1', () => {
+    // D-7b deferred the framework decision. The Phase 1 surface is three routes, so the
+    // server uses node:http directly. A framework here would be adopting a decision that
+    // was explicitly deferred, on no evidence.
+    const pkg = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const all = { ...pkg.dependencies, ...pkg.devDependencies };
+    for (const framework of ['fastify', 'express', 'koa', 'hono', '@hapi/hapi']) {
+      expect(
+        all[framework],
+        `${framework} was deferred and should not be a dependency yet`,
+      ).toBeUndefined();
     }
   });
 });
