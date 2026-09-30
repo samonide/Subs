@@ -3,13 +3,16 @@
 Subtitle generation and editing core. A short video goes in; accurately timed, styled
 subtitles come out, and a human can correct and restyle them through a visual editor.
 
-**Current state: Phase 0 — Architecture & Foundation.**
+**Current state: Phase 1 — Ingest & Project Persistence.**
 
-At this point the repository contains **only the pure domain layer**: the document model,
-the timing model, style resolution, the operation model that undo/redo will be built on,
-and document validation and migration. There is deliberately **no user interface, no HTTP
-server, no FFmpeg integration, and no transcription provider** — those arrive in later
-phases, and each is gated on the layer beneath it being correct.
+The repository contains the **pure domain layer** (`src/core`) and the **ingest and
+persistence layer** (`src/server`). A video can be streamed to controlled storage, probed,
+normalised into canonical metadata, registered as an asset, and persisted in a validated
+project document.
+
+There is deliberately **no user interface, no transcription, no subtitle generation, no
+timeline, and no rendering/export** — those arrive in later phases, each gated on the layer
+beneath it being correct.
 
 ---
 
@@ -67,7 +70,7 @@ Individual steps:
 
 ```
 src/
-  core/                 # Pure domain layer. The only thing that exists in Phase 0.
+  core/                 # Pure domain layer. No filesystem, HTTP, FFmpeg or browser APIs.
     timing/             # Integer-millisecond time, rational frame rates
     document/           # Document model types and stable ID generation
     style/              # The four-level style cascade and animation precedence
@@ -75,9 +78,15 @@ src/
     validation/         # Zod structural schema + semantic invariant checks
     migration/          # Versioned document migration
     testing/            # Document factories shared by tests
+  server/               # Infrastructure. Consumes core; core never imports it.
+    workspace.ts        # Controlled storage paths, identifier and symlink safety
+    errors.ts           # Structured, typed error model
+    project/store.ts    # Project CRUD with atomic writes and migration on load
+    media/              # Filename/type validation, ffprobe adapter, streamed ingest
+    http.ts             # Minimal node:http intake (no framework — see docs/PHASE1.md)
   index.ts              # Public surface of core
-tests/                  # Vitest suites, one per area
-docs/                   # (reserved)
+tests/                  # Vitest suites
+docs/                   # Phase reference documentation
 ```
 
 ### The core boundary
@@ -86,33 +95,53 @@ docs/                   # (reserved)
 runner. It may not import React, the DOM, Node filesystem or process APIs, HTTP servers, or
 provider SDKs. It depends only on itself and `zod`.
 
-This is enforced twice, independently:
+This is enforced three times, independently:
 
 1. `eslint.config.mjs` — a `no-restricted-imports` rule scoped to `src/core/**`.
 2. `tests/boundary.test.ts` — inspects the **compiled** output for forbidden imports and
    DOM globals, so a misconfigured or bypassed lint rule cannot silently permit a breach.
+3. The same test asserts the **dependency direction**: no file under `src/core` may import
+   the infrastructure layer.
 
-The second check exists because a boundary enforced by only one mechanism is a convention,
-and a convention is a rule that breaks by Phase 6.
+The second and third checks exist because a boundary enforced by one mechanism is a
+convention, and a convention is a rule that breaks by Phase 6.
 
 ---
 
-## What's implemented in Phase 0
+## What's implemented so far
 
-| Area                                                                                              | Status                                                   |
-| ------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Integer-millisecond timing with exact rational frame rates                                        | Done, tested at 30 / 29.97 / 60 fps                      |
-| Document model: assets, tracks, segments, words, style and animation registries                   | Done                                                     |
-| Stable, content-independent ID generation                                                         | Done                                                     |
-| Four-level style cascade (project → track → segment → word) with animation precedence             | Done                                                     |
-| Pure operation model (`moveSegment`, `retimeSegment`, `splitSegment`, `mergeSegments`, style ops) | Done                                                     |
-| Worker-result application, so workers never replace the client document                           | Done                                                     |
-| Structural validation (Zod) and semantic invariant validation (I-1…I-14)                          | Done                                                     |
-| Versioned migration foundation with future-version refusal                                        | Done                                                     |
-| Undo/redo UI, history panel, keyboard handling                                                    | **Not in Phase 0** — the op model it will sit on is here |
-| Timeline UI, inspector, preview rendering                                                         | **Phase 6–7**                                            |
-| FFmpeg, audio extraction, transcription                                                           | **Phase 3–4**                                            |
-| Export / libass                                                                                   | **Phase 8**                                              |
+**Phase 0 — Foundation** (pure domain, `src/core`)
+
+| Area                                                                            | Status                              |
+| ------------------------------------------------------------------------------- | ----------------------------------- |
+| Integer-millisecond timing with exact rational frame rates                      | Done, tested at 30 / 29.97 / 60 fps |
+| Document model: assets, tracks, segments, words, style and animation registries | Done                                |
+| Stable, content-independent ID generation                                       | Done                                |
+| Four-level style cascade with animation precedence                              | Done                                |
+| Pure operation model (the undo/redo foundation)                                 | Done                                |
+| Worker-result application, so workers never replace the client document         | Done                                |
+| Structural + semantic document validation                                       | Done                                |
+| Versioned migration foundation with future-version refusal                      | Done                                |
+
+**Phase 1 — Ingest & Project Persistence** (infrastructure, `src/server`)
+
+| Area                                                      | Status                                    |
+| --------------------------------------------------------- | ----------------------------------------- |
+| Streamed ingestion to controlled storage — never buffered | Done, proven by a memory-scaling test     |
+| Extension + MIME allow-list, sanitised filenames          | Done                                      |
+| ffprobe adapter normalising to canonical `MediaMeta`      | Done                                      |
+| Exact rational frame rate, rotation, CFR/VFR detection    | Done                                      |
+| Project CRUD with atomic writes, migration on load        | Done                                      |
+| Typed error model, structured HTTP responses              | Done                                      |
+| Security controls S-1 … S-7                               | Done, each covered by tests               |
+| Undo/redo UI, history panel, keyboard handling            | Not yet — the op model it sits on is done |
+| Video playback, `/media` Range endpoint                   | Phase 2                                   |
+| Audio extraction, jobs, progress                          | Phase 3                                   |
+| Transcription                                             | Phase 4                                   |
+| Timeline UI, inspector, preview                           | Phase 6–7                                 |
+| Export / libass                                           | Phase 8                                   |
+
+Phase 1 details: [`docs/PHASE1.md`](docs/PHASE1.md).
 
 ---
 
