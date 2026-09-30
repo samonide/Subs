@@ -18,6 +18,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { ErrorCode, IngestError, httpStatusFor, isIngestError } from './errors.js';
 import { ingestMedia } from './media/ingest.js';
 import { serveMedia } from './media/serve.js';
+import { createJobStore, createWorker, type JobStore, type Worker } from './jobs/store.js';
+import { serveJobRoutes } from './jobs/routes.js';
 import { type ProjectStore } from './project/store.js';
 import { type WorkspaceLayout } from './workspace.js';
 
@@ -28,7 +30,13 @@ export interface ServerConfig {
   probeTimeoutMs?: number;
   /** Interface to bind. Defaults to loopback: without auth, this must not be reachable. */
   host?: string;
+  /** Job subsystem. Created by {@link createIngestServer} when not supplied. */
+  jobs?: JobStore;
+  worker?: Worker;
 }
+
+/** A config with the job subsystem resolved, as used internally by the router. */
+type ResolvedConfig = ServerConfig & { jobs: JobStore; worker: Worker };
 
 /**
  * Read a small JSON body with a hard cap.
@@ -83,7 +91,7 @@ function sendError(response: ServerResponse, error: unknown): void {
 }
 
 async function route(
-  config: ServerConfig,
+  config: ResolvedConfig,
   request: IncomingMessage,
   response: ServerResponse,
 ): Promise<void> {
@@ -95,6 +103,23 @@ async function route(
   if (
     segments[0] === 'media' &&
     (await serveMedia(request, response, segments, config.layout, config.store))
+  ) {
+    return;
+  }
+
+  // Job routes: extraction start, status poll, cancellation.
+  //
+  // The job subsystem is resolved **once**, when the server is created, not per request.
+  // Building it here would mint a fresh store and worker for every request — meaning the
+  // single-slot queue would be recreated constantly (so "one job at a time" would be false),
+  // and a job created by one request would be invisible to the next.
+  if (
+    await serveJobRoutes(request, response, segments, {
+      layout: config.layout,
+      projects: config.store,
+      jobs: config.jobs,
+      worker: config.worker,
+    })
   ) {
     return;
   }
@@ -266,8 +291,38 @@ async function route(
 }
 
 export function createIngestServer(config: ServerConfig): Server {
+  // Resolve the job subsystem once, here. Doing it inside `route` would create a new store
+  // and a new worker on every request — which would silently break the single-slot guarantee
+  // and make a freshly created job unreadable by the very next poll.
+  const jobs = config.jobs ?? createJobStore(config.layout);
+
+  // Crash recovery, before the server can answer a single request.
+  //
+  // A job found in `queued` or `processing` belongs to a process that is gone: its FFmpeg
+  // child died with the parent, and there is no partial output worth promoting. Marking those
+  // failed — rather than leaving them "processing" — is what stops a restarted server from
+  // showing work that will never finish, and what lets a later cleanup sweep find the
+  // orphaned temp file instead of ignoring it.
+  //
+  // This lives here and not in `startIngestServer` because the real entry point (`main.ts`)
+  // calls `createIngestServer` directly. Recovery in a helper only the tests use is recovery
+  // that never runs in production.
+  const recovered = jobs.recoverInterruptedJobs(new Date().toISOString());
+  if (recovered.length > 0) {
+    process.stderr.write(
+      `recovered ${recovered.length} interrupted job(s): ${recovered
+        .map((record) => record.id)
+        .join(', ')}\n`,
+    );
+  }
+
+  const resolved: ResolvedConfig = {
+    ...config,
+    jobs,
+    worker: config.worker ?? createWorker(config.layout),
+  };
   return createServer((request, response) => {
-    route(config, request, response).catch((error: unknown) => sendError(response, error));
+    route(resolved, request, response).catch((error: unknown) => sendError(response, error));
   });
 }
 
@@ -277,10 +332,22 @@ export interface StartedServer {
   close: () => Promise<void>;
 }
 
-/** Start the server on loopback unless explicitly told otherwise. */
+/**
+ * Start the server on loopback unless explicitly told otherwise.
+ *
+ * Crash recovery has already run inside {@link createIngestServer}; this only adds a bound
+ * port and a promise-shaped handle. Recovery is asserted through the job store, which is
+ * where the observable effect lives.
+ */
 export function startIngestServer(config: ServerConfig, port = 0): Promise<StartedServer> {
-  const server = createIngestServer(config);
+  const resolved: ServerConfig = {
+    ...config,
+    jobs: config.jobs ?? createJobStore(config.layout),
+    worker: config.worker ?? createWorker(config.layout),
+  };
+  const server = createIngestServer(resolved);
   const host = config.host ?? '127.0.0.1';
+
   return new Promise<StartedServer>((resolvePromise, rejectPromise) => {
     server.on('error', rejectPromise);
     server.listen(port, host, () => {
