@@ -108,7 +108,8 @@ describe('asset upload endpoint', () => {
     const response = await fetch(`${server.url}/api/projects/${projectId}/assets`, {
       method: 'POST',
       headers: { 'x-filename': 'clip.mp4', 'content-type': 'video/mp4' },
-      body: bytes,
+      // A UintArray, not a Node Buffer: `fetch`'s BodyInit type rejects Buffer outright.
+      body: new Uint8Array(bytes),
     });
 
     expect(response.status).toBe(201);
@@ -129,7 +130,7 @@ describe('asset upload endpoint', () => {
     const response = await fetch(`${server.url}/api/projects/${projectId}/assets`, {
       method: 'POST',
       headers: { 'x-filename': 'evil.exe', 'content-type': 'application/octet-stream' },
-      body: Buffer.from('nope'),
+      body: new Uint8Array(Buffer.from('nope')),
     });
 
     expect(response.status).toBe(415);
@@ -144,7 +145,7 @@ describe('asset upload endpoint', () => {
     const response = await fetch(`${server.url}/api/projects/${projectId}/assets`, {
       method: 'POST',
       headers: { 'x-filename': 'big.mp4', 'content-type': 'video/mp4' },
-      body: Buffer.alloc(25 * 1024 * 1024, 0x41),
+      body: new Uint8Array(Buffer.alloc(25 * 1024 * 1024, 0x41)),
     });
 
     expect(response.status).toBe(413);
@@ -164,7 +165,7 @@ describe('asset upload endpoint', () => {
     const response = await fetch(`${server.url}/api/projects/${projectId}/assets`, {
       method: 'POST',
       headers: { 'x-filename': 'fake.mp4', 'content-type': 'video/mp4' },
-      body: await readAll(notMedia),
+      body: new Uint8Array(await readAll(notMedia)),
     });
 
     expect(response.status).toBe(500);
@@ -175,7 +176,7 @@ describe('asset upload endpoint', () => {
     expect(reloaded.assets).toHaveLength(0);
   });
 
-  it('rejects a traversal filename without touching the filesystem', async () => {
+  it('sanitizes a traversal filename and never returns a server path', async () => {
     const created = await postJson('/api/projects', { name: 'Traversal' });
     const projectId = (created.body['project'] as { id: string }).id;
     if (!hasFfmpeg || videoPath === undefined) return;
@@ -183,14 +184,44 @@ describe('asset upload endpoint', () => {
     const response = await fetch(`${server.url}/api/projects/${projectId}/assets`, {
       method: 'POST',
       headers: { 'x-filename': '../../../etc/passwd.mp4', 'content-type': 'video/mp4' },
-      body: await readAll(videoPath),
+      body: new Uint8Array(await readAll(videoPath)),
     });
 
     // The name is sanitized to its last segment, so this is accepted and stored safely.
     expect(response.status).toBe(201);
-    const body = (await response.json()) as { asset: { filename: string }; filePath: string };
+    const raw = await response.text();
+    const body = JSON.parse(raw) as {
+      asset: { id: string; filename: string };
+      mediaUrl: string;
+    };
     expect(body.asset.filename).toBe('passwd.mp4');
-    expect(body.filePath).toContain(join(root, 'workspace', 'projects'));
+
+    // The browser addresses media by logical id. An absolute server path must never appear in
+    // any response: it would leak the workspace layout and couple the client to this host.
+    expect(raw).not.toContain(root);
+    expect(raw).not.toMatch(/"filePath"/);
+    expect(body.mediaUrl).toBe(`/media/${projectId}/${body.asset.id}`);
+  });
+
+  it('never leaks a filesystem path through the playback descriptor', async () => {
+    const created = await postJson('/api/projects', { name: 'Descriptor' });
+    const projectId = (created.body['project'] as { id: string }).id;
+    if (!hasFfmpeg || videoPath === undefined) return;
+
+    await fetch(`${server.url}/api/projects/${projectId}/assets`, {
+      method: 'POST',
+      headers: { 'x-filename': 'clip.mp4', 'content-type': 'video/mp4' },
+      body: new Uint8Array(await readAll(videoPath)),
+    });
+
+    const response = await fetch(`${server.url}/api/projects/${projectId}/playback`);
+    const raw = await response.text();
+    expect(response.status).toBe(200);
+    // The descriptor is the browser's entire view of the project. If it contained a path, the
+    // client would have a way to learn the server's filesystem layout.
+    expect(raw).not.toContain(root);
+    expect(raw).not.toContain('workspace');
+    expect(raw).not.toContain('.mp4');
   });
 
   it('rejects a missing filename header', async () => {
@@ -200,7 +231,7 @@ describe('asset upload endpoint', () => {
     const response = await fetch(`${server.url}/api/projects/${projectId}/assets`, {
       method: 'POST',
       headers: { 'content-type': 'video/mp4' },
-      body: Buffer.from('x'),
+      body: new Uint8Array(Buffer.from('x')),
     });
 
     expect(response.status).toBe(400);
@@ -212,7 +243,7 @@ describe('asset upload endpoint', () => {
     const response = await fetch(`${server.url}/api/projects/nosuchproject/assets`, {
       method: 'POST',
       headers: { 'x-filename': 'clip.mp4', 'content-type': 'video/mp4' },
-      body: Buffer.from('x'),
+      body: new Uint8Array(Buffer.from('x')),
     });
     expect(response.status).toBe(404);
   });

@@ -199,20 +199,6 @@ describe('core boundary', () => {
 });
 
 describe('phase 1 scope', () => {
-  it('contains no UI directories in src', () => {
-    // The web app arrives in Phase 7. Creating it now would be speculative structure
-    // with no consumer.
-    for (const forbidden of ['web', 'ui', 'components', 'routes']) {
-      let exists = true;
-      try {
-        statSync(join(srcRoot, forbidden));
-      } catch {
-        exists = false;
-      }
-      expect(exists, `${forbidden}/ should not exist yet`).toBe(false);
-    }
-  });
-
   it('keeps media and transcription out of the server layer', () => {
     // Phase 1 runs ffprobe; it must not transcode (Phase 3), transcribe (Phase 4), or
     // render/export (Phase 8). Those are separate, later capabilities.
@@ -253,10 +239,10 @@ describe('phase 1 scope', () => {
     }
   });
 
-  it('does not depend on a web framework in Phase 1', () => {
-    // D-7b deferred the framework decision. The Phase 1 surface is three routes, so the
-    // server uses node:http directly. A framework here would be adopting a decision that
-    // was explicitly deferred, on no evidence.
+  it('does not depend on a web framework', () => {
+    // D-7b deferred the framework decision. The server surface is a handful of routes, so it
+    // uses node:http directly. A framework here would be adopting a deferred decision on
+    // no evidence.
     const pkg = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
@@ -268,5 +254,120 @@ describe('phase 1 scope', () => {
         `${framework} was deferred and should not be a dependency yet`,
       ).toBeUndefined();
     }
+  });
+});
+
+describe('phase 2 scope', () => {
+  it('contains no editor UI beyond the single browser surface', () => {
+    // The editor UI arrives in Phase 7. A `components/` or `ui/` tree now would be
+    // speculative structure with no consumer — Phase 2 builds exactly one surface.
+    for (const forbidden of ['ui', 'components', 'routes']) {
+      let exists = true;
+      try {
+        statSync(join(srcRoot, forbidden));
+      } catch {
+        exists = false;
+      }
+      expect(exists, `${forbidden}/ should not exist yet`).toBe(false);
+    }
+  });
+
+  it('has no subtitle, transcription, or rendering implementation anywhere in src', () => {
+    // Phase 2 is playback only. The *implementations* belong to Phases 4–8; building any
+    // now would be exactly the scope creep the Agent Development Rules forbid.
+    //
+    // The check targets implementations, not vocabulary. Phases 0 and 2 legitimately
+    // contain an `applyWorkerResult` op labelled "Transcribe", ASS/SRT timecode helpers, and
+    // segment/style types — the shapes had to be settled before any provider or renderer
+    // existed, which is the whole point of separating shape from implementation. Matching
+    // the words would flag that correct groundwork, so the check looks for the actual
+    // machinery: a provider adapter, an HTTP call to a speech API, or an ffmpeg subtitle
+    // burn-in.
+    const forbidden: [RegExp, string][] = [
+      [/TranscriptionProvider/, 'a transcription provider interface'],
+      [/from\s*['"][^'"]*whisper[^'"]*['"]/i, 'a whisper package import'],
+      [/\bwhisper\(/i, 'a whisper invocation'],
+      [
+        /from\s*['"][^'"]*(openai|groq|deepgram|assemblyai|replicate)[^'"]*['"]/i,
+        'a hosted transcription SDK',
+      ],
+      [/\b(fast-xml-parser|xml2js)\b/, 'a subtitle XML parser'],
+      [/\bsubtitles=/, 'an ffmpeg subtitle burn-in'],
+      [/\bkaraoke/i, 'karaoke highlight rendering'],
+      [/renderAss|writeAss|assDocumentFrom/, 'an ASS renderer'],
+    ];
+    for (const file of collectFiles(srcRoot, ['.ts', '.tsx'])) {
+      const source = readFileSync(file, 'utf8');
+      for (const [pattern, description] of forbidden) {
+        expect(
+          pattern.test(source),
+          `${relative(projectRoot, file)} contains ${description} — that belongs to a later phase`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('keeps React out of core and server', () => {
+    // The browser layer may consume core; core and server must never reach up into it.
+    for (const dir of ['core', 'server']) {
+      for (const file of collectFiles(join(srcRoot, dir), ['.ts', '.tsx'])) {
+        const source = readFileSync(file, 'utf8');
+        for (const pattern of [/\bfrom\s*['"]react/, /\bfrom\s*['"]react-dom/]) {
+          expect(
+            pattern.test(source),
+            `${relative(projectRoot, file)} imports React — only src/web may`,
+          ).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('keeps the browser layer free of Node-only APIs', () => {
+    // The reverse direction of the core boundary: web code runs in a browser, so it must
+    // not reach for the filesystem or spawn processes.
+    const forbidden = [/\bfrom\s*['"]node:/, /\brequire\s*\(/, /\bprocess\./];
+    for (const file of collectFiles(join(srcRoot, 'web'), ['.ts', '.tsx'])) {
+      const source = readFileSync(file, 'utf8');
+      for (const pattern of forbidden) {
+        expect(
+          pattern.test(source),
+          `${relative(projectRoot, file)} uses ${pattern} — the browser has no such API`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('converts browser seconds to milliseconds in exactly one place', () => {
+    // The single conversion boundary. Scattering `Math.round(x * 1000)` through components
+    // is how two subtly different rounding rules end up producing off-by-one-frame
+    // subtitle drift, so the conversion is asserted to exist in one file and nowhere else.
+    const offenders: string[] = [];
+    for (const file of collectFiles(join(srcRoot, 'web'), ['.ts', '.tsx'])) {
+      if (file.endsWith(join('playback', 'time.ts'))) {
+        continue; // The boundary itself.
+      }
+      const source = readFileSync(file, 'utf8');
+      // Strip comments so documentation of the rule is not mistaken for a second use.
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      if (/Math\.round\([^)]*currentTime[^)]*\*\s*1000/.test(code)) {
+        offenders.push(relative(projectRoot, file));
+      }
+    }
+    expect(offenders, 'seconds→ms conversion must live only in playback/time.ts').toEqual([]);
+  });
+
+  it('agrees with the server on the port the dev proxy targets', () => {
+    // The Vite dev proxy and the API server must listen on the same port, or the browser
+    // silently fails to load media in development while every test still passes. A literal
+    // repeated in two files drifts; this test exists to catch it when it does.
+    const main = readFileSync(join(srcRoot, 'server', 'main.ts'), 'utf8');
+    const serverPort = /const DEFAULT_PORT = (\d+);/.exec(main)?.[1];
+    expect(serverPort, 'DEFAULT_PORT not found in main.ts').toBeDefined();
+
+    const viteConfig = readFileSync(join(projectRoot, 'vite.config.ts'), 'utf8');
+    const proxyPort = /const SERVER_PORT = (\d+);/.exec(viteConfig)?.[1];
+    expect(proxyPort, 'SERVER_PORT not found in vite.config.ts').toBeDefined();
+
+    expect(proxyPort, 'dev proxy and API server must use the same port').toBe(serverPort);
   });
 });
