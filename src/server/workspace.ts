@@ -233,4 +233,20 @@ export class WorkspaceLayout {
     }
     return join(this.jobDir(jobId), label);
   }
+
+  /**
+   * A job's result payload, stored beside its record rather than inside it.
+   *
+   * A transcription can be hundreds of segments. Keeping it in `job.json` would mean every
+   * status poll re-reads and re-parses it, and would put transcript content in the volatile
+   * runtime store. The job record carries only a reference; the client fetches this file,
+   * applies it as a labelled operation, and the document — not the job store — becomes the
+   * truth (invariant I-20).
+   *
+   * The name is derived from the job id, which the caller generated. It is never a user string.
+   */
+  jobResultFile(jobId: string): string {
+    assertSafeIdentifier(jobId, 'jobId');
+    return join(this.jobDir(jobId), 'result.json');
+  }
 }

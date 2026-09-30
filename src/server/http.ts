@@ -20,6 +20,13 @@ import { ingestMedia } from './media/ingest.js';
 import { serveMedia } from './media/serve.js';
 import { createJobStore, createWorker, type JobStore, type Worker } from './jobs/store.js';
 import { serveJobRoutes } from './jobs/routes.js';
+import { serveTranscriptionRoutes } from './transcription/routes.js';
+import { loadProviderConfig, OpenAITranscriptionProvider } from './transcription/openai.js';
+import {
+  httpStatusForTranscription,
+  isTranscriptionError,
+  type TranscriptionProvider,
+} from '../core/transcription/index.js';
 import { type ProjectStore } from './project/store.js';
 import { type WorkspaceLayout } from './workspace.js';
 
@@ -33,10 +40,30 @@ export interface ServerConfig {
   /** Job subsystem. Created by {@link createIngestServer} when not supplied. */
   jobs?: JobStore;
   worker?: Worker;
+  /**
+   * Resolves the transcription provider, or `undefined` when none is configured.
+   *
+   * A function so that a missing credential is a per-request fact rather than a startup crash:
+   * the server must still serve media and playback when no API key is present, and the
+   * transcription route reports a clear `NotConfigured` at the point of use.
+   */
+  transcriptionProvider?: () => TranscriptionProvider | undefined;
 }
 
 /** A config with the job subsystem resolved, as used internally by the router. */
 type ResolvedConfig = ServerConfig & { jobs: JobStore; worker: Worker };
+
+/**
+ * Build the OpenAI provider from the environment, or report that none is configured.
+ *
+ * Resolved per call so a key added while the server runs is picked up without a restart, and
+ * so a missing key is not a startup crash. The key is read here and never stored on any object
+ * that outlives the request.
+ */
+function defaultProviderResolver(): TranscriptionProvider | undefined {
+  const config = loadProviderConfig();
+  return config === undefined ? undefined : new OpenAITranscriptionProvider(config);
+}
 
 /**
  * Read a small JSON body with a hard cap.
@@ -75,6 +102,14 @@ function sendJson(response: ServerResponse, status: number, body: unknown): void
 }
 
 function sendError(response: ServerResponse, error: unknown): void {
+  // Transcription errors are handled here too, not only inside their own router. A provider
+  // failure raised during routing (an unconfigured provider, a rejected request) would
+  // otherwise fall through to the generic 500 below, and the user would see "something went
+  // wrong" instead of "no provider is configured".
+  if (isTranscriptionError(error)) {
+    sendJson(response, httpStatusForTranscription(error.code), { error: error.toJSON() });
+    return;
+  }
   if (isIngestError(error)) {
     sendJson(response, httpStatusFor(error.code), { error: error.toJSON() });
     return;
@@ -103,6 +138,21 @@ async function route(
   if (
     segments[0] === 'media' &&
     (await serveMedia(request, response, segments, config.layout, config.store))
+  ) {
+    return;
+  }
+
+  // Transcription routes are tried **first**: they own `/api/jobs/:id/result` and
+  // `/api/jobs/:id/operation`, and the generic job router below would claim those paths and
+  // answer 404 before this router ever saw them.
+  if (
+    await serveTranscriptionRoutes(request, response, segments, {
+      layout: config.layout,
+      projects: config.store,
+      jobs: config.jobs,
+      worker: config.worker,
+      provider: config.transcriptionProvider ?? defaultProviderResolver,
+    })
   ) {
     return;
   }

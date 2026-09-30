@@ -26,6 +26,7 @@
 /** The job types this application knows about. */
 export const JobType = {
   AudioExtract: 'media.audio-extract',
+  Transcribe: 'transcription.transcribe',
 } as const;
 
 export type JobTypeValue = (typeof JobType)[keyof typeof JobType];
@@ -115,12 +116,22 @@ export interface JobResult {
    * The asset the job produced, if it produced one.
    *
    * This is a *reference to data the client already has or will fetch*, not a path. An
-   * audio-extract job records that asset X now exists; the client learns its metadata from
-   * the project document (invariant I-13).
+   * audio-extract job records that asset X now exists; the client learns its metadata from the
+   * project document (invariant I-13).
    */
   assetId?: string;
   /** Stable label for undo history, e.g. "Extract audio". */
   label?: string;
+  /**
+   * An opaque handle to a larger result stored beside the job.
+   *
+   * A transcription can be hundreds of segments; embedding it in `job.json` would make every
+   * status poll re-read and re-parse megabytes, and would put transcript content into the
+   * volatile runtime store where a project document does not belong. The job records only that
+   * a result exists; the client fetches it separately and applies it as a labelled operation
+   * (invariant I-20).
+   */
+  resultRef?: string;
 }
 
 export interface JobRecord {
