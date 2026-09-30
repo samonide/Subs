@@ -32,10 +32,14 @@ export type Migration = (document: unknown) => unknown;
 /**
  * Steps keyed by the version they migrate FROM.
  *
- * Empty at v1 because there is nothing before v1. Each future schema bump adds exactly one
- * entry here, plus its test.
+ * v1 → v2 is a no-op: `frameRateMode` and `container` are optional additions, so a v1
+ * document is already valid at v2. It is still recorded, because a version bump without a
+ * migration step is a lie about the mechanism — and the next, non-additive change will
+ * need the pattern to already exist and be tested.
  */
-export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({});
+export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
+  1: (document: unknown) => document,
+});
 
 /** The highest schema version this build understands. */
 export const CURRENT_SCHEMA_VERSION = SCHEMA_VERSION;
@@ -75,6 +79,13 @@ export function migrate(raw: unknown): ProjectDocument {
       );
     }
     current = migration(current);
+  }
+
+  // Stamp the upgraded version. A migrated document that kept its old version number would
+  // re-run every step on the next load, and — worse — could be re-migrated by a build that
+  // has since added steps for that older version.
+  if (version < CURRENT_SCHEMA_VERSION && typeof current === 'object' && current !== null) {
+    (current as { schemaVersion: number }).schemaVersion = CURRENT_SCHEMA_VERSION;
   }
 
   const parsed = projectDocumentSchema.safeParse(current);

@@ -37,8 +37,15 @@ export type {
   WordId,
 } from './ids.js';
 
-/** Current document schema version. Bump when the model changes, and add a migration. */
-export const SCHEMA_VERSION = 1;
+/**
+ * Current document schema version. Bump when the model changes, and add a migration.
+ *
+ * v1 — the initial model.
+ * v2 — `MediaMeta` gained `frameRateMode` and `container` (Phase 1 ingest). Additive and
+ *      optional, so v1 documents remain structurally valid; the migration is still
+ *      recorded and tested so the version bump is honest and repeatable.
+ */
+export const SCHEMA_VERSION = 2;
 
 // ────────────────────────────── Media assets ──────────────────────────────
 
@@ -61,10 +68,27 @@ export interface MediaMeta {
   /**
    * Exact rational frame rate. Stored as a pair so that treating 29.97 as 30 becomes
    * unrepresentable — assuming 30fps on a 29.97 source drifts ~3.6 seconds per hour.
+   *
+   * Prefer these over any convenience float. If a caller needs a display value, derive
+   * one; never store one.
    */
   frameRateNum?: number;
   frameRateDen?: number;
+  /**
+   * Whether the source has a constant or variable frame rate.
+   *
+   * This matters to the product, not just to diagnostics: a VFR source has no single
+   * frame grid, which is why seeking strategy is an open question (R-21). Distinguishing
+   * CFR from VFR at ingest is far cheaper than discovering it during playback.
+   */
+  frameRateMode?: 'cfr' | 'vfr';
   codec?: string;
+  /**
+   * Container format, as reported by the probe (e.g. `mov,mp4,m4a`). Retained because
+   * export and playback behaviour depend on the container, and because it is the basis
+   * for validating that a file is what its extension claims.
+   */
+  container?: string;
   audioCodec?: string;
   sampleRate?: number;
   channels?: number;

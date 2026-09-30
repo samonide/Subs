@@ -131,6 +131,8 @@ export const assetRecordSchema = z.object({
       rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).optional(),
       frameRateNum: z.number().int().positive().optional(),
       frameRateDen: z.number().int().positive().optional(),
+      frameRateMode: z.enum(['cfr', 'vfr']).optional(),
+      container: z.string().min(1).optional(),
       codec: z.string().optional(),
       audioCodec: z.string().optional(),
       sampleRate: z.number().int().positive().optional(),

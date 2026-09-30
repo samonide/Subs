@@ -12,13 +12,24 @@ import { makeDocument } from '../src/core/testing/factories.js';
 describe('migration foundation', () => {
   it('exposes a single current schema version', () => {
     expect(CURRENT_SCHEMA_VERSION).toBe(SCHEMA_VERSION);
-    expect(CURRENT_SCHEMA_VERSION).toBe(1);
+    expect(CURRENT_SCHEMA_VERSION).toBe(2);
   });
 
-  it('has no historical migrations yet — v1 is the first version', () => {
-    // Historical migrations are added when versions actually change. Inventing them now
-    // would be complexity with no consumer.
-    expect(MIGRATIONS).toEqual({});
+  it('has a migration step registered for every version below current', () => {
+    // A version bump without a registered step would be a lie about the mechanism, and
+    // the next non-additive change needs the pattern to already exist and be tested.
+    for (let version = 1; version < CURRENT_SCHEMA_VERSION; version += 1) {
+      expect(MIGRATIONS[version], `no migration registered from v${version}`).toBeDefined();
+    }
+  });
+
+  it('migrates a v1 document up to current', () => {
+    // v1 → v2 is additive: the new MediaMeta fields are optional, so a real v1 document
+    // must load without loss.
+    const v1 = { ...makeDocument(), schemaVersion: 1 };
+    const migrated = migrate(JSON.parse(JSON.stringify(v1)) as unknown);
+    expect(migrated.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    expect(migrated.id).toBe(v1.id);
   });
 
   it('migrates a current-version document unchanged', () => {
